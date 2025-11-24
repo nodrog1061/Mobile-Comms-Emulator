@@ -388,6 +388,9 @@ async def generate_screenshots_async(platform, num_screenshots, messages_before,
     zip_filename = f'{platform}_screenshots_{timestamp}.zip'
     zip_path = os.path.join(OUTPUT_FOLDER, zip_filename)
     
+    # Metadata storage
+    metadata_records = []
+    
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={'width': 375, 'height': 812})
@@ -395,15 +398,20 @@ async def generate_screenshots_async(platform, num_screenshots, messages_before,
         with zipfile.ZipFile(zip_path, 'w') as zipf:
             for i in range(num_screenshots):
                 # Get conversation messages
-                messages_pre, messages_post = get_conversation_messages(messages_before, messages_after)
+                messages_pre, messages_post, convo_metadata = get_conversation_messages_with_metadata(messages_before, messages_after)
                 
-                # Get random evidence image
-                evidence_img_b64 = random.choice(evidence_images)
+                # Get random evidence image with tracking
+                evidence_idx = random.randint(0, len(evidence_images) - 1)
+                evidence_img_b64 = evidence_images[evidence_idx]
+                evidence_filename = f"evidence_image_{evidence_idx + 1}"
                 
                 # Get random contact
                 contact_name = random.choice(CONTACT_NAMES)
                 avatar_seed = random.randint(1, 100)
                 avatar_url = get_avatar_url(avatar_seed)
+                
+                # Determine image sender
+                image_sender = random.choice(['sent', 'received'])
                 
                 # Render HTML
                 html_content = render_messaging_html(
@@ -413,22 +421,83 @@ async def generate_screenshots_async(platform, num_screenshots, messages_before,
                 
                 # Load and screenshot
                 await page.set_content(html_content)
-                await page.wait_for_timeout(500)  # Wait for images to load
+                await page.wait_for_timeout(500)
                 
                 screenshot_bytes = await page.screenshot(type='jpeg', quality=95)
                 
-                # Add to ZIP
-                zipf.writestr(f'{platform}_screenshot_{i+1}.jpg', screenshot_bytes)
+                # Filename for this screenshot
+                screenshot_filename = f'{platform}_screenshot_{i+1}.jpg'
                 
-                print(f"Generated {i+1}/{num_screenshots}")
+                # Add to ZIP
+                zipf.writestr(screenshot_filename, screenshot_bytes)
+                
+                # Create metadata record
+                metadata_record = {
+                    'screenshot_id': i + 1,
+                    'filename': screenshot_filename,
+                    'platform': platform,
+                    'contact_name': contact_name,
+                    'timestamp_generated': datetime.now().isoformat(),
+                    'evidence_image': {
+                        'index': evidence_idx,
+                        'filename': evidence_filename,
+                        'position': image_sender
+                    },
+                    'conversation': {
+                        'subreddit': convo_metadata.get('subreddit', 'generic'),
+                        'conversation_id': convo_metadata.get('conversation_id', 'generic'),
+                        'title': convo_metadata.get('title', ''),
+                        'num_messages_before_image': len(messages_pre),
+                        'num_messages_after_image': len(messages_post),
+                        'total_messages': len(messages_pre) + len(messages_post) + 1
+                    },
+                    'messages': {
+                        'before_image': [{'sender': m['sender'], 'text': m['text']} for m in messages_pre],
+                        'after_image': [{'sender': m['sender'], 'text': m['text']} for m in messages_post]
+                    }
+                }
+                
+                metadata_records.append(metadata_record)
+                
+                print(f"Generated {i+1}/{num_screenshots} - Subreddit: {convo_metadata.get('subreddit', 'generic')}")
+            
+            # Add metadata JSON to ZIP
+            metadata_json = json.dumps({
+                'batch_info': {
+                    'platform': platform,
+                    'total_screenshots': num_screenshots,
+                    'generated_at': datetime.now().isoformat(),
+                    'messages_before_image': messages_before,
+                    'messages_after_image': messages_after
+                },
+                'screenshots': metadata_records
+            }, indent=2)
+            
+            zipf.writestr('metadata.json', metadata_json)
+            
+            # Also create a CSV version for easy viewing
+            csv_lines = ['screenshot_id,filename,platform,subreddit,conversation_id,evidence_image_index,image_position,num_messages,contact_name\n']
+            for record in metadata_records:
+                csv_lines.append(
+                    f"{record['screenshot_id']},"
+                    f"{record['filename']},"
+                    f"{record['platform']},"
+                    f"{record['conversation']['subreddit']},"
+                    f"{record['conversation']['conversation_id']},"
+                    f"{record['evidence_image']['index']},"
+                    f"{record['evidence_image']['position']},"
+                    f"{record['conversation']['total_messages']},"
+                    f"{record['contact_name']}\n"
+                )
+            zipf.writestr('metadata.csv', ''.join(csv_lines))
         
         await browser.close()
     
     return zip_path
 
 
-def get_conversation_messages(num_before, num_after):
-    """Get conversation messages from ConvoKit or generate generic ones"""
+def get_conversation_messages_with_metadata(num_before, num_after):
+    """Get conversation messages from ConvoKit and return with metadata"""
     
     if convokit_conversations:
         # Try up to 10 times to get a good conversation
@@ -463,7 +532,15 @@ def get_conversation_messages(num_before, num_after):
                 messages_pre = selected_messages[:num_before]
                 messages_post = selected_messages[num_before:num_before + num_after]
                 
-                return messages_pre, messages_post
+                # Build metadata
+                metadata = {
+                    'subreddit': convo.get('subreddit', 'unknown'),
+                    'conversation_id': convo.get('id', 'unknown'),
+                    'title': convo.get('title', ''),
+                    'source': 'convokit'
+                }
+                
+                return messages_pre, messages_post, metadata
         
         # If we couldn't find a good conversation after 10 tries, fall through to generic
     
@@ -482,7 +559,14 @@ def get_conversation_messages(num_before, num_after):
     messages_pre = generic[:num_before]
     messages_post = generic[num_before:num_before + num_after]
     
-    return messages_pre, messages_post
+    metadata = {
+        'subreddit': 'generic',
+        'conversation_id': 'generic',
+        'title': 'Generic conversation',
+        'source': 'generated'
+    }
+    
+    return messages_pre, messages_post, metadata
 
 
 def render_messaging_html(platform, contact_name, avatar_url, messages_before, evidence_image_b64, messages_after):
