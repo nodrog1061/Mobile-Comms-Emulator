@@ -1,4 +1,5 @@
 # REST API v2 - Template-Based Screenshot Generator
+[![DOI](https://zenodo.org/badge/1103269225.svg)](https://doi.org/10.5281/zenodo.17702615)
 ## Using Flask Templates + Playwright for Realistic Screenshots
 
 This version uses proper HTML templates rendered by a headless browser, so screenshots look exactly like the real apps!
